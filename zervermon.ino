@@ -680,7 +680,7 @@ void handleSerial() {
     } else {
       inputLine += c;
 
-      if (inputLine.length() > 1200) {
+      if (inputLine.length() > 1600) {
         inputLine = "";
       }
     }
@@ -753,6 +753,7 @@ void loop() {
 }
 
 void setup() {
+  Serial.setRxBufferSize(2048);
   Serial.begin(SERIAL_BAUD);
   delay(500);
 

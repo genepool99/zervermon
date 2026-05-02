@@ -86,6 +86,17 @@ def log(message: str) -> None:
     print(f"[{timestamp}] {message}", flush=True)
 
 
+def write_serial_line(serial, line: str) -> None:
+    """Write one serial line in small chunks so the ESP32 can keep up."""
+    data = line + "\n"
+    chunk_size = 96
+
+    for start in range(0, len(data), chunk_size):
+        serial.write(data[start:start + chunk_size])
+        serial.flush()
+        time.sleep(0.01)
+
+
 def get_hostname() -> str:
     """Return the short hostname for the current machine."""
     return socket.gethostname().split(".")[0] or "server"
@@ -639,8 +650,7 @@ def main() -> None:
                     if LOG_EVERY_N_PAYLOADS <= 1 or payload_count % LOG_EVERY_N_PAYLOADS == 0:
                         log(line)
 
-                    serial.write(line + "\n")
-                    serial.flush()
+                    write_serial_line(serial, line)
 
                     time.sleep(INTERVAL_SECONDS)
 
