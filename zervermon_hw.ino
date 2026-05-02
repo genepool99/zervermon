@@ -9,6 +9,8 @@
 #define PAGE_INTERVAL_MS 5000UL
 #define FRAME_INTERVAL_MS 120UL
 #define SCREENSAVER_AFTER_MS 60000UL
+#define WALKER_INTERVAL_MS 60000UL
+#define WALKER_DURATION_MS 7000UL
 #define DISPLAY_OFF_AFTER_MS 1800000UL  // 30 minutes
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C display(
@@ -24,8 +26,10 @@ String lastJson = "";
 unsigned long lastDataMs = 0;
 unsigned long lastFrameMs = 0;
 unsigned long lastPageMs = 0;
+unsigned long lastWalkerStartMs = 0;
 
 bool displayIsOn = true;
+bool walkerActive = false;
 
 int currentPage = 0;
 const int pageCount = 3;
@@ -129,36 +133,47 @@ void drawSystemPage(const String& json) {
   display.setFont(u8g2_font_6x10_tf);
 
   display.drawStr(0, 25, "IP");
-  display.drawStr(44, 25, ip.c_str());
+  display.drawStr(38, 25, ip.c_str());
 
   display.drawStr(0, 38, "Load");
-  display.drawStr(44, 38, load.c_str());
+  display.drawStr(38, 38, load.c_str());
 
-  display.drawStr(0, 51, "CPU");
-  display.drawStr(44, 51, temp.c_str());
+  display.drawStr(0, 51, "CPU/RAM");
 
-  display.drawStr(0, 64, "RAM");
-  display.drawStr(44, 64, ram.c_str());
+  char cpuRam[32];
+  snprintf(cpuRam, sizeof(cpuRam), "%s %s", temp.c_str(), ram.c_str());
+  display.drawStr(50, 51, cpuRam);
 }
 
 void drawZfsPage(const String& json) {
   String hostname = getHostname(json);
-  String pool = valueOrDash(getValue(json, "pool"));
-  String used = valueOrDash(getValue(json, "used"));
-  String total = valueOrDash(getValue(json, "total"));
+  String zfs1 = valueOrDash(getValue(json, "zfs1"));
+  String zfs2 = valueOrDash(getValue(json, "zfs2"));
+  String zfs3 = valueOrDash(getValue(json, "zfs3"));
+
+  if (zfs1 == "-") {
+    String pool = valueOrDash(getValue(json, "pool"));
+    String used = valueOrDash(getValue(json, "used"));
+    String total = valueOrDash(getValue(json, "total"));
+
+    zfs1 = pool;
+    zfs2 = used + "/" + total;
+    zfs3 = "-";
+  }
 
   drawHeader(hostname, "ZFS");
 
-  display.setFont(u8g2_font_6x10_tf);
+  display.setFont(u8g2_font_5x8_tf);
 
-  display.drawStr(0, 28, "Pool");
-  display.drawStr(44, 28, pool.c_str());
+  display.drawStr(0, 26, zfs1.c_str());
 
-  display.drawStr(0, 42, "Used");
-  display.drawStr(44, 42, used.c_str());
+  if (zfs2 != "-") {
+    display.drawStr(0, 40, zfs2.c_str());
+  }
 
-  display.drawStr(0, 56, "Total");
-  display.drawStr(44, 56, total.c_str());
+  if (zfs3 != "-") {
+    display.drawStr(0, 54, zfs3.c_str());
+  }
 }
 
 void drawTempPage(const String& json) {
@@ -177,8 +192,61 @@ void drawTempPage(const String& json) {
   display.drawStr(0, 42, "Disk");
   display.drawStr(44, 42, disk.c_str());
 
-  display.drawStr(0, 56, "Fan");
-  display.drawStr(44, 56, fan.c_str());
+  display.drawStr(0, 54, "Fan");
+  display.drawStr(44, 54, fan.c_str());
+}
+
+void maybeUpdateWalker(bool hasRecentData) {
+  unsigned long now = millis();
+
+  // Decorative footer-only animation; disable it when there is no active status data.
+  if (!hasRecentData || lastJson.length() == 0) {
+    walkerActive = false;
+    return;
+  }
+
+  if (walkerActive) {
+    if (now - lastWalkerStartMs >= WALKER_DURATION_MS) {
+      walkerActive = false;
+      lastWalkerStartMs = now;
+    }
+    return;
+  }
+
+  if (now - lastWalkerStartMs >= WALKER_INTERVAL_MS) {
+    walkerActive = true;
+    lastWalkerStartMs = now;
+  }
+}
+
+void drawWalker() {
+  if (!walkerActive) {
+    return;
+  }
+
+  unsigned long elapsed = millis() - lastWalkerStartMs;
+  if (elapsed >= WALKER_DURATION_MS) {
+    return;
+  }
+
+  int x = map(elapsed, 0, WALKER_DURATION_MS, -12, 132);
+  int y = 56;
+  int step = (millis() / 180) % 2;
+
+  // Decorative footer walker constrained to the reserved bottom band.
+  display.drawBox(x + 2, y + 2, 7, 4);
+  display.drawPixel(x + 1, y + 1);
+  display.drawPixel(x + 8, y + 1);
+  display.drawPixel(x + 4, y + 3);
+  display.drawLine(x + 9, y + 3, x + 11, y + 1);
+
+  if (step == 0) {
+    display.drawPixel(x + 3, y + 6);
+    display.drawPixel(x + 7, y + 6);
+  } else {
+    display.drawPixel(x + 2, y + 6);
+    display.drawPixel(x + 8, y + 6);
+  }
 }
 
 void drawNoDataPage() {
@@ -218,12 +286,15 @@ void drawStatusFrame() {
     drawTempPage(lastJson);
   }
 
-  // Small animated footer sweep to keep bottom pixels changing.
-  int sweepX = (millis() / 60) % 128;
-  display.drawHLine(0, 63, 128);
-  display.setDrawColor(0);
-  display.drawBox(sweepX, 62, 12, 2);
-  display.setDrawColor(1);
+  if (walkerActive) {
+    drawWalker();
+  } else {
+    int sweepX = (millis() / 60) % 128;
+    display.drawHLine(0, 61, 128);
+    display.setDrawColor(0);
+    display.drawBox(sweepX, 60, 12, 3);
+    display.setDrawColor(1);
+  }
 
   display.sendBuffer();
 }
@@ -348,16 +419,20 @@ void loop() {
   bool hasRecentData = lastDataMs > 0 && now - lastDataMs < SCREENSAVER_AFTER_MS;
 
   if (lastJson.length() == 0) {
+    maybeUpdateWalker(false);
     drawNoDataPage();
     return;
   }
 
   if (!hasRecentData) {
+    maybeUpdateWalker(false);
     drawScreensaverFrame();
     return;
   }
 
   display.setContrast(180);
+
+  maybeUpdateWalker(true);
 
   if (now - lastPageMs >= PAGE_INTERVAL_MS) {
     lastPageMs = now;
