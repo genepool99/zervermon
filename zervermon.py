@@ -96,7 +96,7 @@ def get_load() -> str:
             return " ".join(parts[:3])
         if parts:
             return parts[0]
-    except Exception:
+    except OSError:
         pass
     return "-"
 
@@ -211,7 +211,14 @@ def get_cpu_temp() -> str:
     output = run(["sensors"], timeout=4)
 
     if output:
-        # Prefer the CPU package temperature from coretemp.
+        match = re.search(
+            r"CPU0 Temperature:\s+\+([0-9]+(?:\.[0-9]+)?)°C",
+            output,
+        )
+        if match:
+            return f"{round(float(match.group(1)))}C"
+
+        # Fallback to the CPU package temperature from coretemp.
         match = re.search(
             r"Package id \d+:\s+\+([0-9]+(?:\.[0-9]+)?)°C",
             output,
@@ -257,6 +264,22 @@ def get_cpu_temp() -> str:
     return "-"
 
 
+def get_ambient_temp() -> str:
+    """Return the ambient system temperature when exposed by lm-sensors."""
+    output = run(["sensors"], timeout=4)
+    if not output:
+        return "-"
+
+    match = re.search(
+        r"System Ambient Temperature:\s+\+([0-9]+(?:\.[0-9]+)?)°C",
+        output,
+    )
+    if match:
+        return f"{round(float(match.group(1)))}C"
+
+    return "-"
+
+
 def get_disk_max_temp() -> str:
     """Return the highest SMART-reported disk temperature in Celsius."""
     temps = []
@@ -298,20 +321,64 @@ def get_disk_max_temp() -> str:
     return "-"
 
 
-def get_fan_status() -> str:
-    """Return whether fan RPM data is visible in lm-sensors output."""
+def get_hp_fans() -> dict[str, str]:
+    """Return HP WMI fan RPM values keyed by cpu/rear/front/mem."""
     output = run(["sensors"], timeout=4)
     if not output:
-        return "-"
+        return {}
 
-    if re.search(r"fan\d+:\s+\d+\s+RPM", output):
-        return "OK"
+    fan_map = {
+        "cpu": "N/A",
+        "rear": "N/A",
+        "front": "N/A",
+        "mem": "N/A",
+    }
 
-    return "-"
+    patterns = {
+        "cpu": r"CPU0 Fan:\s+([0-9]+)\s+RPM",
+        "rear": r"Rear Chassis Fan0:\s+([0-9]+)\s+RPM",
+        "front": r"Front Chassis Fan0:\s+([0-9]+)\s+RPM",
+        "mem": r"Memory Fan0:\s+([0-9]+)\s+RPM",
+    }
+
+    for key, pattern in patterns.items():
+        match = re.search(pattern, output)
+        if match:
+            fan_map[key] = match.group(1)
+
+    return fan_map
+
+
+def get_fan_status(fans: dict[str, str] | None = None) -> str:
+    """Return a compact min-max summary of detected fan RPM values."""
+    if fans is None:
+        fans = get_hp_fans()
+
+    rpms = []
+    for value in fans.values():
+        if value.isdigit():
+            rpms.append(int(value))
+
+    if not rpms:
+        output = run(["sensors"], timeout=4)
+        for match in re.finditer(r":\s+([0-9]+)\s+RPM", output):
+            try:
+                rpms.append(int(match.group(1)))
+            except ValueError:
+                pass
+
+    if not rpms:
+        return "N/A"
+
+    if len(rpms) == 1:
+        return str(rpms[0])
+
+    return f"{min(rpms)}-{max(rpms)}"
 
 
 def build_payload() -> dict[str, str]:
     """Assemble the serial payload for the ESP32 display."""
+    fans = get_hp_fans()
     pools = get_all_pool_names()
 
     primary_pool = POOL_NAME
@@ -332,11 +399,16 @@ def build_payload() -> dict[str, str]:
         "load": get_load(),
         "pool": get_pool_overall_health(pools),
         "temp": get_cpu_temp(),
+        "ambient": get_ambient_temp(),
         "ram": get_ram_percent(),
         "used": used,
         "total": total,
         "disk": get_disk_max_temp(),
-        "fan": get_fan_status(),
+        "fan": get_fan_status(fans),
+        "fan_cpu": fans.get("cpu", "N/A"),
+        "fan_rear": fans.get("rear", "N/A"),
+        "fan_front": fans.get("front", "N/A"),
+        "fan_mem": fans.get("mem", "N/A"),
         "zfs1": zfs_lines[0],
         "zfs2": zfs_lines[1],
         "zfs3": zfs_lines[2],

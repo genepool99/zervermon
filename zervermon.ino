@@ -13,6 +13,8 @@
 #define SCREENSAVER_AFTER_MS 60000UL
 #define WALKER_INTERVAL_MS 60000UL
 #define WALKER_DURATION_MS 7000UL
+#define FULL_SWEEP_INTERVAL_MS 180000UL
+#define FULL_SWEEP_DURATION_MS 8000UL
 #define DISPLAY_OFF_AFTER_MS 1800000UL  // 30 minutes
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C display(
@@ -29,14 +31,16 @@ unsigned long lastDataMs = 0;
 unsigned long lastFrameMs = 0;
 unsigned long lastPageMs = 0;
 unsigned long lastWalkerStartMs = 0;
+unsigned long lastFullSweepStartMs = 0;
 unsigned long bootStartedMs = 0;
 
 bool displayIsOn = true;
 bool walkerActive = false;
+bool fullSweepActive = false;
 bool startupComplete = false;
 
 int currentPage = 0;
-const int pageCount = 3;
+const int pageCount = 4;
 
 // Screensaver position
 int saverX = 0;
@@ -189,6 +193,7 @@ void drawZfsPage(const String& json) {
 void drawTempPage(const String& json) {
   String hostname = getHostname(json);
   String temp = valueOrDash(getValue(json, "temp"));
+  String ambient = valueOrDash(getValue(json, "ambient"));
   String disk = valueOrDash(getValue(json, "disk"));
   String fan = valueOrDash(getValue(json, "fan"));
 
@@ -196,14 +201,81 @@ void drawTempPage(const String& json) {
 
   display.setFont(u8g2_font_6x10_tf);
 
-  display.drawStr(0, 28, "CPU");
-  display.drawStr(44, 28, temp.c_str());
+  display.drawStr(0, 27, "CPU");
+  display.drawStr(28, 27, temp.c_str());
 
-  display.drawStr(0, 42, "Disk");
-  display.drawStr(44, 42, disk.c_str());
+  display.drawStr(68, 27, "Amb");
+  display.drawStr(96, 27, ambient.c_str());
 
-  display.drawStr(0, 54, "Fan");
-  display.drawStr(44, 54, fan.c_str());
+  display.drawStr(0, 41, "Disk");
+  display.drawStr(38, 41, disk.c_str());
+
+  display.drawStr(0, 55, "Fan");
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(38, 55, fan.c_str());
+  display.setFont(u8g2_font_6x10_tf);
+}
+
+void drawFanPage(const String& json) {
+  String hostname = getHostname(json);
+  String fanCpu = valueOrDash(getValue(json, "fan_cpu"));
+  String fanRear = valueOrDash(getValue(json, "fan_rear"));
+  String fanFront = valueOrDash(getValue(json, "fan_front"));
+  String fanMem = valueOrDash(getValue(json, "fan_mem"));
+
+  drawHeader(hostname, "FAN");
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(0, 25, "CPU");
+  display.drawStr(36, 25, fanCpu.c_str());
+
+  display.drawStr(0, 38, "Rear");
+  display.drawStr(36, 38, fanRear.c_str());
+
+  display.drawStr(0, 51, "Front");
+  display.drawStr(36, 51, fanFront.c_str());
+
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(78, 51, "Mem");
+  display.drawStr(101, 51, fanMem.c_str());
+}
+
+void drawTinyMascot(int x, int y, int step) {
+  display.drawBox(x + 2, y + 2, 7, 4);
+  display.drawPixel(x + 1, y + 1);
+  display.drawPixel(x + 8, y + 1);
+  display.drawPixel(x + 4, y + 3);
+  display.drawLine(x + 9, y + 3, x + 11, y + 1);
+
+  if (step == 0) {
+    display.drawPixel(x + 3, y + 6);
+    display.drawPixel(x + 7, y + 6);
+  } else {
+    display.drawPixel(x + 2, y + 6);
+    display.drawPixel(x + 8, y + 6);
+  }
+}
+
+void maybeUpdateFullSweep(bool hasRecentData) {
+  unsigned long now = millis();
+
+  if (!hasRecentData || lastJson.length() == 0) {
+    fullSweepActive = false;
+    return;
+  }
+
+  if (fullSweepActive) {
+    if (now - lastFullSweepStartMs >= FULL_SWEEP_DURATION_MS) {
+      fullSweepActive = false;
+      lastFullSweepStartMs = now;
+    }
+    return;
+  }
+
+  if (now - lastFullSweepStartMs >= FULL_SWEEP_INTERVAL_MS) {
+    fullSweepActive = true;
+    lastFullSweepStartMs = now;
+  }
 }
 
 void maybeUpdateWalker(bool hasRecentData) {
@@ -244,19 +316,7 @@ void drawWalker() {
   int step = (millis() / 180) % 2;
 
   // Decorative footer walker constrained to the reserved bottom band.
-  display.drawBox(x + 2, y + 2, 7, 4);
-  display.drawPixel(x + 1, y + 1);
-  display.drawPixel(x + 8, y + 1);
-  display.drawPixel(x + 4, y + 3);
-  display.drawLine(x + 9, y + 3, x + 11, y + 1);
-
-  if (step == 0) {
-    display.drawPixel(x + 3, y + 6);
-    display.drawPixel(x + 7, y + 6);
-  } else {
-    display.drawPixel(x + 2, y + 6);
-    display.drawPixel(x + 8, y + 6);
-  }
+  drawTinyMascot(x, y, step);
 }
 
 void drawStartupFrame() {
@@ -275,22 +335,48 @@ void drawStartupFrame() {
   display.drawBox(14, 38, barW, 8);
 
   int x = map(elapsed % STARTUP_ANIMATION_MS, 0, STARTUP_ANIMATION_MS, -12, 132);
-  int y = 55;
+  int yValues[] = {4, 16, 28, 40, 52};
+  int band = (elapsed / 2000) % 5;
+  int y = yValues[band];
   int step = (millis() / 180) % 2;
 
-  display.drawBox(x + 2, y + 2, 7, 4);
-  display.drawPixel(x + 1, y + 1);
-  display.drawPixel(x + 8, y + 1);
-  display.drawPixel(x + 4, y + 3);
-  display.drawLine(x + 9, y + 3, x + 11, y + 1);
+  drawTinyMascot(x, y, step);
 
-  if (step == 0) {
-    display.drawPixel(x + 3, y + 6);
-    display.drawPixel(x + 7, y + 6);
-  } else {
-    display.drawPixel(x + 2, y + 6);
-    display.drawPixel(x + 8, y + 6);
+  display.sendBuffer();
+}
+
+void drawFullSweepFrame() {
+  wakeDisplay();
+  display.setContrast(180);
+  display.clearBuffer();
+
+  unsigned long elapsed = millis() - lastFullSweepStartMs;
+  if (elapsed >= FULL_SWEEP_DURATION_MS) {
+    fullSweepActive = false;
+    return;
   }
+
+  int x = map(elapsed, 0, FULL_SWEEP_DURATION_MS, -12, 132);
+  int band = (elapsed / 1000) % 5;
+  int yValues[] = {4, 16, 28, 40, 52};
+  int y = yValues[band];
+  int step = (millis() / 160) % 2;
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(18, 12, "ZerverMon");
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(22, 24, "pixel sweep");
+
+  int sparkle = (millis() / 90) % 128;
+  display.drawPixel(sparkle, 2);
+  display.drawPixel((sparkle + 31) % 128, 18);
+  display.drawPixel((sparkle + 67) % 128, 36);
+  display.drawPixel((sparkle + 101) % 128, 62);
+
+  drawTinyMascot(x, y, step);
+
+  int wipeX = (millis() / 40) % 128;
+  display.drawVLine(wipeX, 0, 64);
 
   display.sendBuffer();
 }
@@ -351,8 +437,10 @@ void drawStatusFrame() {
     drawSystemPage(lastJson);
   } else if (currentPage == 1) {
     drawZfsPage(lastJson);
-  } else {
+  } else if (currentPage == 2) {
     drawTempPage(lastJson);
+  } else {
+    drawFanPage(lastJson);
   }
 
   if (walkerActive) {
@@ -475,7 +563,7 @@ void handleSerial() {
     } else {
       inputLine += c;
 
-      if (inputLine.length() > 300) {
+      if (inputLine.length() > 600) {
         inputLine = "";
       }
     }
@@ -516,6 +604,7 @@ void loop() {
   }
 
   if (lastDataMs > 0 && now - lastDataMs >= ERROR_AFTER_MS) {
+    maybeUpdateFullSweep(false);
     maybeUpdateWalker(false);
     drawErrorFrame();
     return;
@@ -524,6 +613,13 @@ void loop() {
   bool hasRecentData = lastDataMs > 0 && now - lastDataMs < SCREENSAVER_AFTER_MS;
 
   display.setContrast(180);
+
+  maybeUpdateFullSweep(hasRecentData);
+  if (fullSweepActive) {
+    maybeUpdateWalker(false);
+    drawFullSweepFrame();
+    return;
+  }
 
   maybeUpdateWalker(hasRecentData);
 
