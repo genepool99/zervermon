@@ -40,7 +40,8 @@ bool fullSweepActive = false;
 bool startupComplete = false;
 
 int currentPage = 0;
-const int pageCount = 4;
+const int BASE_PAGE_COUNT = 4;
+const int MAX_POOL_PAGES = 4;
 
 // Screensaver position
 int saverX = 0;
@@ -90,6 +91,47 @@ String getIpAddress(const String& json) {
   return "-";
 }
 
+bool poolPagePresent(const String& json, int poolIndex) {
+  String key = "pool" + String(poolIndex) + "_name";
+  String name = getValue(json, key);
+  return name.length() > 0 && name != "-";
+}
+
+int getDynamicPageCount() {
+  int count = BASE_PAGE_COUNT;
+
+  if (lastJson.length() == 0) {
+    return BASE_PAGE_COUNT;
+  }
+
+  for (int i = 1; i <= MAX_POOL_PAGES; i++) {
+    if (poolPagePresent(lastJson, i)) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+int dynamicPageToPoolIndex(int page) {
+  int poolPageOffset = page - BASE_PAGE_COUNT;
+  if (poolPageOffset < 0) {
+    return 0;
+  }
+
+  int seen = 0;
+  for (int i = 1; i <= MAX_POOL_PAGES; i++) {
+    if (poolPagePresent(lastJson, i)) {
+      if (seen == poolPageOffset) {
+        return i;
+      }
+      seen++;
+    }
+  }
+
+  return 0;
+}
+
 void wakeDisplay() {
   if (!displayIsOn) {
     display.setPowerSave(0);
@@ -131,32 +173,57 @@ void drawHeader(const String& hostname, const char* pageLabel) {
 
 void drawSystemPage(const String& json) {
   String hostname = getHostname(json);
-  String ip = getIpAddress(json);
+  String currentTime = valueOrDash(getValue(json, "time"));
+  String date = valueOrDash(getValue(json, "date"));
+  String uptime = valueOrDash(getValue(json, "uptime"));
+  String users = valueOrDash(getValue(json, "users"));
   String load = valueOrDash(getValue(json, "load"));
-  String temp = valueOrDash(getValue(json, "temp"));
-  String ram = valueOrDash(getValue(json, "ram"));
 
   drawHeader(hostname, "SYS");
 
   display.setFont(u8g2_font_6x10_tf);
 
-  display.drawStr(0, 25, "IP");
-  display.drawStr(38, 25, ip.c_str());
+  display.drawStr(0, 25, "Time");
+  display.drawStr(38, 25, currentTime.c_str());
 
-  display.drawStr(0, 38, "Load");
-  if (load.length() > 9) {
-    display.setFont(u8g2_font_5x8_tf);
-    display.drawStr(38, 38, load.c_str());
-    display.setFont(u8g2_font_6x10_tf);
-  } else {
-    display.drawStr(38, 38, load.c_str());
-  }
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(78, 25, date.c_str());
 
-  display.drawStr(0, 51, "CPU/RAM");
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(0, 38, "Up");
+  display.drawStr(38, 38, uptime.c_str());
 
-  char cpuRam[32];
-  snprintf(cpuRam, sizeof(cpuRam), "%s %s", temp.c_str(), ram.c_str());
-  display.drawStr(50, 51, cpuRam);
+  display.drawStr(0, 51, "User");
+  display.drawStr(38, 51, users.c_str());
+
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(62, 51, "Ld");
+  display.drawStr(76, 51, load.c_str());
+}
+
+void drawNetPage(const String& json) {
+  String hostname = getHostname(json);
+  String iface = valueOrDash(getValue(json, "net_iface"));
+  String ip = valueOrDash(getValue(json, "ip"));
+  String speed = valueOrDash(getValue(json, "net_speed"));
+  String rx = valueOrDash(getValue(json, "net_rx"));
+  String tx = valueOrDash(getValue(json, "net_tx"));
+
+  drawHeader(hostname, "NET");
+
+  display.setFont(u8g2_font_6x10_tf);
+
+  display.drawStr(0, 25, "Iface");
+  display.drawStr(44, 25, iface.c_str());
+
+  display.drawStr(0, 38, "IP");
+  display.drawStr(44, 38, ip.c_str());
+
+  display.drawStr(0, 51, "R/T");
+
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(28, 51, rx.c_str());
+  display.drawStr(76, 51, tx.c_str());
 }
 
 void drawZfsPage(const String& json) {
@@ -227,17 +294,56 @@ void drawFanPage(const String& json) {
 
   display.setFont(u8g2_font_6x10_tf);
   display.drawStr(0, 25, "CPU");
-  display.drawStr(36, 25, fanCpu.c_str());
+  display.drawStr(42, 25, fanCpu.c_str());
 
   display.drawStr(0, 38, "Rear");
-  display.drawStr(36, 38, fanRear.c_str());
+  display.drawStr(42, 38, fanRear.c_str());
 
   display.drawStr(0, 51, "Front");
-  display.drawStr(36, 51, fanFront.c_str());
+  display.drawStr(42, 51, fanFront.c_str());
 
   display.setFont(u8g2_font_5x8_tf);
-  display.drawStr(78, 51, "Mem");
-  display.drawStr(101, 51, fanMem.c_str());
+  display.drawStr(82, 51, "Mem");
+  display.drawStr(104, 51, fanMem.c_str());
+}
+
+void drawPoolPage(const String& json, int poolIndex) {
+  if (poolIndex <= 0) {
+    drawZfsPage(json);
+    return;
+  }
+
+  String hostname = getHostname(json);
+  String prefix = "pool" + String(poolIndex) + "_";
+
+  String name = valueOrDash(getValue(json, prefix + "name"));
+  String health = valueOrDash(getValue(json, prefix + "health"));
+  String used = valueOrDash(getValue(json, prefix + "used"));
+  String total = valueOrDash(getValue(json, prefix + "total"));
+  String capacity = valueOrDash(getValue(json, prefix + "capacity"));
+
+  char label[4];
+  snprintf(label, sizeof(label), "P%d", poolIndex);
+
+  drawHeader(hostname, label);
+
+  display.setFont(u8g2_font_6x10_tf);
+
+  if (name.length() > 14) {
+    name = name.substring(0, 13) + ".";
+  }
+
+  display.drawStr(0, 25, name.c_str());
+
+  display.drawStr(0, 38, health.c_str());
+  display.drawStr(70, 38, capacity.c_str());
+
+  display.drawStr(0, 51, "Used");
+  display.drawStr(38, 51, used.c_str());
+
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(78, 51, "Tot");
+  display.drawStr(96, 51, total.c_str());
 }
 
 void drawTinyMascot(int x, int y, int step) {
@@ -433,14 +539,25 @@ void drawStatusFrame() {
     return;
   }
 
+  int dynamicCount = getDynamicPageCount();
+  if (dynamicCount <= 0) {
+    dynamicCount = BASE_PAGE_COUNT;
+  }
+  if (currentPage >= dynamicCount) {
+    currentPage = 0;
+  }
+
   if (currentPage == 0) {
     drawSystemPage(lastJson);
   } else if (currentPage == 1) {
-    drawZfsPage(lastJson);
+    drawNetPage(lastJson);
   } else if (currentPage == 2) {
     drawTempPage(lastJson);
-  } else {
+  } else if (currentPage == 3) {
     drawFanPage(lastJson);
+  } else {
+    int poolIndex = dynamicPageToPoolIndex(currentPage);
+    drawPoolPage(lastJson, poolIndex);
   }
 
   if (walkerActive) {
@@ -563,7 +680,7 @@ void handleSerial() {
     } else {
       inputLine += c;
 
-      if (inputLine.length() > 600) {
+      if (inputLine.length() > 1200) {
         inputLine = "";
       }
     }
@@ -625,7 +742,11 @@ void loop() {
 
   if (now - lastPageMs >= PAGE_INTERVAL_MS) {
     lastPageMs = now;
-    currentPage = (currentPage + 1) % pageCount;
+    int dynamicCount = getDynamicPageCount();
+    if (dynamicCount <= 0) {
+      dynamicCount = BASE_PAGE_COUNT;
+    }
+    currentPage = (currentPage + 1) % dynamicCount;
   }
 
   drawStatusFrame();

@@ -7,6 +7,7 @@ import re
 import socket
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -39,13 +40,22 @@ def load_env_file(path: Path) -> None:
 load_env_file(ENV_FILE)
 
 
+def get_env_int(name: str, default: int) -> int:
+    """Return an integer environment variable value with a safe fallback."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 SERIAL_PORT = os.getenv(
     "SERIAL_PORT",
     "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_AC:A7:04:B9:2C:F0-if00",
 )
 
-INTERVAL_SECONDS = int(os.getenv("INTERVAL_SECONDS", "5"))
-LOG_EVERY_N_PAYLOADS = int(os.getenv("LOG_EVERY_N_PAYLOADS", "60"))
+INTERVAL_SECONDS = get_env_int("INTERVAL_SECONDS", 5)
+LOG_EVERY_N_PAYLOADS = get_env_int("LOG_EVERY_N_PAYLOADS", 60)
+MAX_POOLS = get_env_int("MAX_POOLS", 4)
 
 _pool_name = os.getenv("POOL_NAME", "").strip()
 POOL_NAME = _pool_name if _pool_name else None
@@ -53,6 +63,8 @@ POOL_NAME = _pool_name if _pool_name else None
 _pool_names = os.getenv("POOL_NAMES", "").strip()
 POOL_NAMES = [name.strip() for name in _pool_names.split(",")
               if name.strip()] if _pool_names else None
+
+NET_LAST: dict[str, tuple[int, int, float]] = {}
 
 
 def run(cmd: list[str], timeout: int = 3) -> str:
@@ -66,6 +78,12 @@ def run(cmd: list[str], timeout: int = 3) -> str:
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return ""
+
+
+def log(message: str) -> None:
+    """Print a timestamped local log message."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 def get_hostname() -> str:
@@ -190,6 +208,38 @@ def get_pool_summary_line(pool: str) -> str:
     return f"{name} {health} {used}/{total}"
 
 
+def get_pool_detail(pool: str) -> dict[str, str]:
+    """Return structured pool details for one ZFS pool."""
+    output = run(["zpool", "list", "-H", "-o", "name,health,allocated,size,capacity", pool])
+
+    if not output:
+        return {
+            "name": pool or "-",
+            "health": "-",
+            "used": "-",
+            "total": "-",
+            "capacity": "-",
+        }
+
+    parts = output.split()
+    if len(parts) < 5:
+        return {
+            "name": pool or "-",
+            "health": "-",
+            "used": "-",
+            "total": "-",
+            "capacity": "-",
+        }
+
+    return {
+        "name": parts[0],
+        "health": parts[1],
+        "used": parts[2],
+        "total": parts[3],
+        "capacity": parts[4],
+    }
+
+
 def get_pool_overall_health(pools: list[str]) -> str:
     """Collapse per-pool health into a single status for the payload."""
     if not pools:
@@ -278,6 +328,120 @@ def get_ambient_temp() -> str:
         return f"{round(float(match.group(1)))}C"
 
     return "-"
+
+
+def get_system_time() -> str:
+    """Return the current local system time in hours and minutes."""
+    return datetime.now().strftime("%H:%M")
+
+
+def get_system_date() -> str:
+    """Return the current local system date."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def get_uptime() -> str:
+    """Return a compact uptime string."""
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as file_handle:
+            seconds = int(float(file_handle.read().split()[0]))
+
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+
+        if days > 0:
+            return f"{days}d {hours}h"
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+    except (OSError, ValueError, IndexError):
+        return "-"
+
+
+def get_logged_in_users() -> str:
+    """Return the number of unique logged-in usernames."""
+    output = run(["who"])
+    if not output:
+        return "0"
+
+    users = set()
+    for line in output.splitlines():
+        parts = line.split()
+        if parts:
+            users.add(parts[0])
+
+    return str(len(users))
+
+
+def get_default_iface() -> str:
+    """Return the default IPv4 egress interface name."""
+    output = run(["sh", "-c", "ip -4 route get 1.1.1.1 | awk '{print $5; exit}'"])
+    return output or "-"
+
+
+def get_link_speed(iface: str) -> str:
+    """Return link speed for an interface in megabits per second."""
+    if not iface or iface == "-":
+        return "-"
+
+    path = Path("/sys/class/net") / iface / "speed"
+    try:
+        speed = path.read_text(encoding="utf-8").strip()
+        if speed and speed != "-1":
+            return f"{speed}M"
+    except OSError:
+        pass
+
+    return "-"
+
+
+def read_net_bytes(iface: str) -> tuple[int, int] | None:
+    """Return RX and TX byte counters for an interface."""
+    if not iface or iface == "-":
+        return None
+
+    base = Path("/sys/class/net") / iface / "statistics"
+
+    try:
+        rx = int((base / "rx_bytes").read_text(encoding="utf-8").strip())
+        tx = int((base / "tx_bytes").read_text(encoding="utf-8").strip())
+        return rx, tx
+    except (OSError, ValueError):
+        return None
+
+
+def format_rate(bytes_per_second: float) -> str:
+    """Format a byte rate for compact display."""
+    if bytes_per_second >= 1024 * 1024:
+        return f"{bytes_per_second / (1024 * 1024):.1f}M/s"
+    if bytes_per_second >= 1024:
+        return f"{bytes_per_second / 1024:.0f}K/s"
+    return f"{bytes_per_second:.0f}B/s"
+
+
+def get_net_rates(iface: str) -> tuple[str, str]:
+    """Return RX and TX rates for an interface using cached byte counters."""
+    now = time.monotonic()
+    current = read_net_bytes(iface)
+
+    if current is None:
+        return "-", "-"
+
+    rx, tx = current
+    previous = NET_LAST.get(iface)
+    NET_LAST[iface] = (rx, tx, now)
+
+    if previous is None:
+        return "0B/s", "0B/s"
+
+    prev_rx, prev_tx, prev_time = previous
+    elapsed = max(now - prev_time, 0.001)
+
+    rx_rate = max((rx - prev_rx) / elapsed, 0)
+    tx_rate = max((tx - prev_tx) / elapsed, 0)
+
+    return format_rate(rx_rate), format_rate(tx_rate)
 
 
 def get_disk_max_temp() -> str:
@@ -393,7 +557,10 @@ def build_payload() -> dict[str, str]:
     while len(zfs_lines) < 3:
         zfs_lines.append("-")
 
-    return {
+    iface = get_default_iface()
+    net_rx, net_tx = get_net_rates(iface)
+
+    payload = {
         "hostname": get_hostname(),
         "ip": get_ip(),
         "load": get_load(),
@@ -412,25 +579,57 @@ def build_payload() -> dict[str, str]:
         "zfs1": zfs_lines[0],
         "zfs2": zfs_lines[1],
         "zfs3": zfs_lines[2],
+        "uptime": get_uptime(),
+        "users": get_logged_in_users(),
+        "time": get_system_time(),
+        "date": get_system_date(),
+        "net_iface": iface,
+        "net_speed": get_link_speed(iface),
+        "net_rx": net_rx,
+        "net_tx": net_tx,
+        "pool_count": str(min(len(pools), MAX_POOLS)),
     }
+
+    selected_pools = pools[:MAX_POOLS]
+
+    for index in range(MAX_POOLS):
+        slot = index + 1
+
+        if index < len(selected_pools):
+            detail = get_pool_detail(selected_pools[index])
+        else:
+            detail = {
+                "name": "-",
+                "health": "-",
+                "used": "-",
+                "total": "-",
+                "capacity": "-",
+            }
+
+        payload[f"pool{slot}_name"] = detail["name"]
+        payload[f"pool{slot}_health"] = detail["health"]
+        payload[f"pool{slot}_used"] = detail["used"]
+        payload[f"pool{slot}_total"] = detail["total"]
+        payload[f"pool{slot}_capacity"] = detail["capacity"]
+
+    return payload
 
 
 def main() -> None:
     """Continuously publish host metrics to the configured serial device."""
-    print(
-        f"ESP32 OLED sender starting. Serial port: {SERIAL_PORT}", flush=True)
+    log(f"ESP32 OLED sender starting. Serial port: {SERIAL_PORT}")
 
     payload_count = 0
 
     while True:
         if not os.path.exists(SERIAL_PORT):
-            print(f"Waiting for serial port: {SERIAL_PORT}", flush=True)
+            log(f"Waiting for serial port: {SERIAL_PORT}")
             time.sleep(2)
             continue
 
         try:
             with open(SERIAL_PORT, "w", encoding="utf-8", buffering=1) as serial:
-                print("Serial port opened.", flush=True)
+                log("Serial port opened.")
 
                 while True:
                     payload = build_payload()
@@ -438,7 +637,7 @@ def main() -> None:
 
                     payload_count += 1
                     if LOG_EVERY_N_PAYLOADS <= 1 or payload_count % LOG_EVERY_N_PAYLOADS == 0:
-                        print(line, flush=True)
+                        log(line)
 
                     serial.write(line + "\n")
                     serial.flush()
@@ -446,10 +645,10 @@ def main() -> None:
                     time.sleep(INTERVAL_SECONDS)
 
         except KeyboardInterrupt:
-            print("Stopped.")
+            log("Stopped.")
             return
         except OSError as exc:
-            print(f"Serial/write error: {exc}")
+            log(f"Serial/write error: {exc}")
             time.sleep(2)
 
 
