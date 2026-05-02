@@ -15,7 +15,8 @@
 #define WALKER_DURATION_MS 7000UL
 #define FULL_SWEEP_INTERVAL_MS 180000UL
 #define FULL_SWEEP_DURATION_MS 8000UL
-#define DISPLAY_OFF_AFTER_MS 1800000UL  // 30 minutes
+#define ERROR_SWEEP_INTERVAL_MS 60000UL
+#define ERROR_SWEEP_DURATION_MS 6000UL
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C display(
   U8G2_R0,
@@ -32,11 +33,13 @@ unsigned long lastFrameMs = 0;
 unsigned long lastPageMs = 0;
 unsigned long lastWalkerStartMs = 0;
 unsigned long lastFullSweepStartMs = 0;
+unsigned long lastErrorSweepStartMs = 0;
 unsigned long bootStartedMs = 0;
 
 bool displayIsOn = true;
 bool walkerActive = false;
 bool fullSweepActive = false;
+bool errorSweepActive = false;
 bool startupComplete = false;
 
 int currentPage = 0;
@@ -362,6 +365,40 @@ void drawTinyMascot(int x, int y, int step) {
   }
 }
 
+void drawBigMascot(int x, int y, int mouthOpen) {
+  display.drawRFrame(x + 4, y + 4, 10, 7, 2);
+  display.drawBox(x + 5, y + 5, 8, 5);
+
+  display.drawRFrame(x + 13, y + 3, 6, 6, 2);
+
+  display.drawPixel(x + 14, y + 2);
+  display.drawPixel(x + 17, y + 2);
+
+  display.drawPixel(x + 16, y + 5);
+
+  if (mouthOpen) {
+    display.drawLine(x + 19, y + 6, x + 22, y + 4);
+    display.drawLine(x + 19, y + 7, x + 22, y + 9);
+  } else {
+    display.drawPixel(x + 20, y + 7);
+  }
+
+  display.drawLine(x + 4, y + 6, x + 1, y + 4);
+
+  display.drawPixel(x + 6, y + 11);
+  display.drawPixel(x + 11, y + 11);
+}
+
+void drawSnack(int x, int y, bool eaten) {
+  if (eaten) {
+    return;
+  }
+
+  display.drawDisc(x, y, 1);
+  display.drawPixel(x - 2, y);
+  display.drawPixel(x + 2, y);
+}
+
 void maybeUpdateFullSweep(bool hasRecentData) {
   unsigned long now = millis();
 
@@ -381,6 +418,23 @@ void maybeUpdateFullSweep(bool hasRecentData) {
   if (now - lastFullSweepStartMs >= FULL_SWEEP_INTERVAL_MS) {
     fullSweepActive = true;
     lastFullSweepStartMs = now;
+  }
+}
+
+void maybeUpdateErrorSweep() {
+  unsigned long now = millis();
+
+  if (errorSweepActive) {
+    if (now - lastErrorSweepStartMs >= ERROR_SWEEP_DURATION_MS) {
+      errorSweepActive = false;
+      lastErrorSweepStartMs = now;
+    }
+    return;
+  }
+
+  if (now - lastErrorSweepStartMs >= ERROR_SWEEP_INTERVAL_MS) {
+    errorSweepActive = true;
+    lastErrorSweepStartMs = now;
   }
 }
 
@@ -433,8 +487,8 @@ void drawStartupFrame() {
   unsigned long elapsed = millis() - bootStartedMs;
 
   display.setFont(u8g2_font_6x10_tf);
-  display.drawStr(16, 12, "ZerverMon");
-  display.drawStr(10, 28, "Starting display");
+  display.drawStr(18, 14, "Waking up...");
+  display.drawStr(20, 28, "finding snacks");
 
   int barW = map(min(elapsed, STARTUP_ANIMATION_MS), 0, STARTUP_ANIMATION_MS, 0, 100);
   display.drawFrame(14, 38, 100, 8);
@@ -462,27 +516,36 @@ void drawFullSweepFrame() {
     return;
   }
 
-  int x = map(elapsed, 0, FULL_SWEEP_DURATION_MS, -12, 132);
-  int band = (elapsed / 1000) % 5;
-  int yValues[] = {4, 16, 28, 40, 52};
+  int x = map(elapsed, 0, FULL_SWEEP_DURATION_MS, -24, 132);
+  int yValues[] = {3, 14, 25, 36, 47};
+  int band = (elapsed / 1400) % 5;
   int y = yValues[band];
-  int step = (millis() / 160) % 2;
+  int mouthOpen = (millis() / 180) % 2;
 
-  display.setFont(u8g2_font_6x10_tf);
-  display.drawStr(18, 12, "ZerverMon");
-  display.setFont(u8g2_font_5x8_tf);
-  display.drawStr(22, 24, "pixel sweep");
+  const int snackCount = 6;
+  int snackX[snackCount] = {18, 38, 58, 78, 98, 118};
 
-  int sparkle = (millis() / 90) % 128;
+  for (int i = 0; i < snackCount; i++) {
+    int snackY = y + 7;
+    bool eaten = x + 22 > snackX[i];
+    drawSnack(snackX[i], snackY, eaten);
+  }
+
+  int sparkle = (millis() / 80) % 128;
   display.drawPixel(sparkle, 2);
-  display.drawPixel((sparkle + 31) % 128, 18);
-  display.drawPixel((sparkle + 67) % 128, 36);
-  display.drawPixel((sparkle + 101) % 128, 62);
+  display.drawPixel((sparkle + 41) % 128, 20);
+  display.drawPixel((sparkle + 79) % 128, 43);
+  display.drawPixel((sparkle + 111) % 128, 62);
 
-  drawTinyMascot(x, y, step);
+  for (int t = 0; t < 5; t++) {
+    int tx = x - 6 - (t * 5);
+    int ty = y + 6 + ((t % 2) * 2);
+    if (tx >= 0 && tx < 128 && ty >= 0 && ty < 64) {
+      display.drawPixel(tx, ty);
+    }
+  }
 
-  int wipeX = (millis() / 40) % 128;
-  display.drawVLine(wipeX, 0, 64);
+  drawBigMascot(x, y, mouthOpen);
 
   display.sendBuffer();
 }
@@ -505,6 +568,46 @@ void drawErrorFrame() {
     display.drawLine(124, 12, 118, 2);
     display.drawPixel(118, 8);
     display.drawPixel(118, 10);
+  }
+
+  display.sendBuffer();
+}
+
+void drawErrorSweepFrame() {
+  wakeDisplay();
+  display.setContrast(255);
+  display.clearBuffer();
+
+  unsigned long elapsed = millis() - lastErrorSweepStartMs;
+  if (elapsed >= ERROR_SWEEP_DURATION_MS) {
+    errorSweepActive = false;
+    return;
+  }
+
+  int x = map(elapsed, 0, ERROR_SWEEP_DURATION_MS, -24, 132);
+  int yValues[] = {4, 18, 32, 46};
+  int band = (elapsed / 1200) % 4;
+  int y = yValues[band];
+  int mouthOpen = (millis() / 160) % 2;
+
+  int scan = (millis() / 45) % 128;
+  for (int offset = 0; offset < 64; offset += 16) {
+    int sx = (scan + offset) % 128;
+    display.drawVLine(sx, 0, 64);
+  }
+
+  int sparkle = (millis() / 70) % 128;
+  display.drawPixel(sparkle, 3);
+  display.drawPixel((sparkle + 29) % 128, 17);
+  display.drawPixel((sparkle + 61) % 128, 35);
+  display.drawPixel((sparkle + 97) % 128, 58);
+
+  drawBigMascot(x, y, mouthOpen);
+
+  if ((millis() / 300) % 2 == 0) {
+    display.drawFrame(45, 24, 38, 16);
+    display.setFont(u8g2_font_6x10_tf);
+    display.drawStr(50, 36, "ERROR");
   }
 
   display.sendBuffer();
@@ -709,23 +812,32 @@ void loop() {
   }
 
   if (lastJson.length() == 0) {
+    maybeUpdateFullSweep(false);
     maybeUpdateWalker(false);
-    drawErrorFrame();
-    return;
-  }
+    maybeUpdateErrorSweep();
 
-  if (lastDataMs > 0 && now - lastDataMs >= DISPLAY_OFF_AFTER_MS) {
-    maybeUpdateWalker(false);
-    sleepDisplay();
+    if (errorSweepActive) {
+      drawErrorSweepFrame();
+    } else {
+      drawErrorFrame();
+    }
     return;
   }
 
   if (lastDataMs > 0 && now - lastDataMs >= ERROR_AFTER_MS) {
     maybeUpdateFullSweep(false);
     maybeUpdateWalker(false);
-    drawErrorFrame();
+    maybeUpdateErrorSweep();
+
+    if (errorSweepActive) {
+      drawErrorSweepFrame();
+    } else {
+      drawErrorFrame();
+    }
     return;
   }
+
+  errorSweepActive = false;
 
   bool hasRecentData = lastDataMs > 0 && now - lastDataMs < SCREENSAVER_AFTER_MS;
 
