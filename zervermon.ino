@@ -17,6 +17,7 @@
 #define FULL_SWEEP_DURATION_MS 8000UL
 #define ERROR_SWEEP_INTERVAL_MS 60000UL
 #define ERROR_SWEEP_DURATION_MS 6000UL
+#define CONNECTED_MESSAGE_MS 2500UL
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C display(
   U8G2_R0,
@@ -35,12 +36,15 @@ unsigned long lastWalkerStartMs = 0;
 unsigned long lastFullSweepStartMs = 0;
 unsigned long lastErrorSweepStartMs = 0;
 unsigned long bootStartedMs = 0;
+unsigned long connectedMessageStartMs = 0;
 
 bool displayIsOn = true;
 bool walkerActive = false;
 bool fullSweepActive = false;
 bool errorSweepActive = false;
 bool startupComplete = false;
+bool startupSweepComplete = false;
+bool connectedMessageShown = false;
 
 int currentPage = 0;
 const int BASE_PAGE_COUNT = 4;
@@ -613,6 +617,34 @@ void drawErrorSweepFrame() {
   display.sendBuffer();
 }
 
+void drawConnectedFrame() {
+  wakeDisplay();
+  display.setContrast(180);
+  display.clearBuffer();
+
+  String hostname = "server";
+  if (lastJson.length() > 0) {
+    hostname = getHostname(lastJson);
+  }
+
+  if (hostname.length() > 16) {
+    hostname = hostname.substring(0, 15) + ".";
+  }
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(22, 22, "connected to");
+
+  display.setFont(u8g2_font_10x20_tf);
+  display.drawStr(8, 48, hostname.c_str());
+
+  int x = (millis() / 80) % 128;
+  display.drawPixel(x, 62);
+  display.drawPixel((x + 12) % 128, 62);
+  display.drawPixel((x + 24) % 128, 62);
+
+  display.sendBuffer();
+}
+
 void drawNoDataPage() {
   wakeDisplay();
 
@@ -773,8 +805,13 @@ void handleSerial() {
 
         wakeDisplay();
 
-        // Do not interrupt the startup animation.
-        if (startupComplete) {
+        if (
+          startupComplete &&
+          startupSweepComplete &&
+          connectedMessageShown &&
+          !fullSweepActive &&
+          !errorSweepActive
+        ) {
           drawStatusFrame();
         }
       }
@@ -808,7 +845,36 @@ void loop() {
     }
 
     startupComplete = true;
-    lastPageMs = now;
+
+    // Start one fun full-screen sweep immediately after wakeup.
+    fullSweepActive = true;
+    lastFullSweepStartMs = now;
+    return;
+  }
+
+  if (!startupSweepComplete) {
+    if (fullSweepActive) {
+      drawFullSweepFrame();
+      return;
+    }
+
+    startupSweepComplete = true;
+    connectedMessageStartMs = now;
+    lastFullSweepStartMs = now;
+    return;
+  }
+
+  if (!connectedMessageShown) {
+    if (lastJson.length() == 0) {
+      connectedMessageShown = true;
+    } else if (now - connectedMessageStartMs < CONNECTED_MESSAGE_MS) {
+      drawConnectedFrame();
+      return;
+    } else {
+      connectedMessageShown = true;
+      lastPageMs = now;
+      currentPage = 0;
+    }
   }
 
   if (lastJson.length() == 0) {
