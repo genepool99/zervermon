@@ -88,12 +88,17 @@ def get_ip() -> str:
 
 
 def get_load() -> str:
-    """Return the 1-minute system load average."""
+    """Return compact system load averages for 1, 5, and 15 minutes."""
     try:
         with open("/proc/loadavg", "r", encoding="utf-8") as f:
-            return f.read().split()[0]
-    except OSError:
-        return "-"
+            parts = f.read().split()
+        if len(parts) >= 3:
+            return " ".join(parts[:3])
+        if parts:
+            return parts[0]
+    except Exception:
+        pass
+    return "-"
 
 
 def get_ram_percent() -> str:

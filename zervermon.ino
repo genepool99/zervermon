@@ -6,7 +6,9 @@
 #define SCL_PIN 6
 #define SERIAL_BAUD 115200
 
-#define PAGE_INTERVAL_MS 5000UL
+#define STARTUP_ANIMATION_MS 10000UL
+#define ERROR_AFTER_MS 30000UL
+#define PAGE_INTERVAL_MS 8000UL
 #define FRAME_INTERVAL_MS 120UL
 #define SCREENSAVER_AFTER_MS 60000UL
 #define WALKER_INTERVAL_MS 60000UL
@@ -27,9 +29,11 @@ unsigned long lastDataMs = 0;
 unsigned long lastFrameMs = 0;
 unsigned long lastPageMs = 0;
 unsigned long lastWalkerStartMs = 0;
+unsigned long bootStartedMs = 0;
 
 bool displayIsOn = true;
 bool walkerActive = false;
+bool startupComplete = false;
 
 int currentPage = 0;
 const int pageCount = 3;
@@ -136,7 +140,13 @@ void drawSystemPage(const String& json) {
   display.drawStr(38, 25, ip.c_str());
 
   display.drawStr(0, 38, "Load");
-  display.drawStr(38, 38, load.c_str());
+  if (load.length() > 9) {
+    display.setFont(u8g2_font_5x8_tf);
+    display.drawStr(38, 38, load.c_str());
+    display.setFont(u8g2_font_6x10_tf);
+  } else {
+    display.drawStr(38, 38, load.c_str());
+  }
 
   display.drawStr(0, 51, "CPU/RAM");
 
@@ -247,6 +257,65 @@ void drawWalker() {
     display.drawPixel(x + 2, y + 6);
     display.drawPixel(x + 8, y + 6);
   }
+}
+
+void drawStartupFrame() {
+  wakeDisplay();
+  display.setContrast(180);
+  display.clearBuffer();
+
+  unsigned long elapsed = millis() - bootStartedMs;
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(16, 12, "ZerverMon");
+  display.drawStr(10, 28, "Starting display");
+
+  int barW = map(min(elapsed, STARTUP_ANIMATION_MS), 0, STARTUP_ANIMATION_MS, 0, 100);
+  display.drawFrame(14, 38, 100, 8);
+  display.drawBox(14, 38, barW, 8);
+
+  int x = map(elapsed % STARTUP_ANIMATION_MS, 0, STARTUP_ANIMATION_MS, -12, 132);
+  int y = 55;
+  int step = (millis() / 180) % 2;
+
+  display.drawBox(x + 2, y + 2, 7, 4);
+  display.drawPixel(x + 1, y + 1);
+  display.drawPixel(x + 8, y + 1);
+  display.drawPixel(x + 4, y + 3);
+  display.drawLine(x + 9, y + 3, x + 11, y + 1);
+
+  if (step == 0) {
+    display.drawPixel(x + 3, y + 6);
+    display.drawPixel(x + 7, y + 6);
+  } else {
+    display.drawPixel(x + 2, y + 6);
+    display.drawPixel(x + 8, y + 6);
+  }
+
+  display.sendBuffer();
+}
+
+void drawErrorFrame() {
+  wakeDisplay();
+  display.setContrast(255);
+  display.clearBuffer();
+
+  display.setFont(u8g2_font_10x20_tf);
+  display.drawStr(8, 24, "ERROR");
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(0, 42, "No serial data");
+  display.drawStr(0, 56, "Check TrueNAS sender");
+
+  if ((millis() / 500) % 2 == 0) {
+    display.drawLine(112, 12, 124, 12);
+    display.drawLine(112, 12, 118, 2);
+    display.drawLine(124, 12, 118, 2);
+    display.drawPixel(118, 8);
+    display.drawPixel(118, 10);
+  }
+
+  display.sendBuffer();
 }
 
 void drawNoDataPage() {
@@ -380,13 +449,26 @@ void handleSerial() {
       inputLine.trim();
 
       if (inputLine.length() > 0) {
+        bool hadNoData = lastJson.length() == 0;
+        bool wasIdle = lastDataMs > 0 && millis() - lastDataMs >= ERROR_AFTER_MS;
+
         lastJson = inputLine;
         lastDataMs = millis();
-        currentPage = 0;
-        lastPageMs = millis();
+
+        // Only jump back to the SYS page when data first appears
+        // or when recovering from an error/no-data state.
+        // Do not reset the page on every normal update.
+        if (hadNoData || wasIdle) {
+          currentPage = 0;
+          lastPageMs = millis();
+        }
 
         wakeDisplay();
-        drawStatusFrame();
+
+        // Do not interrupt the startup animation.
+        if (startupComplete) {
+          drawStatusFrame();
+        }
       }
 
       inputLine = "";
@@ -405,34 +487,45 @@ void loop() {
 
   unsigned long now = millis();
 
-  if (lastDataMs > 0 && now - lastDataMs >= DISPLAY_OFF_AFTER_MS) {
-    sleepDisplay();
-    return;
-  }
-
   if (now - lastFrameMs < FRAME_INTERVAL_MS) {
     return;
   }
 
   lastFrameMs = now;
 
-  bool hasRecentData = lastDataMs > 0 && now - lastDataMs < SCREENSAVER_AFTER_MS;
+  if (!startupComplete) {
+    if (now - bootStartedMs < STARTUP_ANIMATION_MS) {
+      drawStartupFrame();
+      return;
+    }
+
+    startupComplete = true;
+    lastPageMs = now;
+  }
 
   if (lastJson.length() == 0) {
     maybeUpdateWalker(false);
-    drawNoDataPage();
+    drawErrorFrame();
     return;
   }
 
-  if (!hasRecentData) {
+  if (lastDataMs > 0 && now - lastDataMs >= DISPLAY_OFF_AFTER_MS) {
     maybeUpdateWalker(false);
-    drawScreensaverFrame();
+    sleepDisplay();
     return;
   }
+
+  if (lastDataMs > 0 && now - lastDataMs >= ERROR_AFTER_MS) {
+    maybeUpdateWalker(false);
+    drawErrorFrame();
+    return;
+  }
+
+  bool hasRecentData = lastDataMs > 0 && now - lastDataMs < SCREENSAVER_AFTER_MS;
 
   display.setContrast(180);
 
-  maybeUpdateWalker(true);
+  maybeUpdateWalker(hasRecentData);
 
   if (now - lastPageMs >= PAGE_INTERVAL_MS) {
     lastPageMs = now;
@@ -451,5 +544,8 @@ void setup() {
   display.begin();
   display.setContrast(180);
 
-  drawNoDataPage();
+  bootStartedMs = millis();
+  startupComplete = false;
+
+  drawStartupFrame();
 }
