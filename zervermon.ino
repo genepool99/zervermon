@@ -76,7 +76,7 @@ bool connectedMessageShown = false;
 bool waitingForInitialData = false;
 
 int currentPage = 0;
-const int BASE_PAGE_COUNT = 4;
+const int BASE_PAGE_COUNT = 5;
 const int MAX_POOL_PAGES = 4;
 unsigned long waitingForInitialDataStartMs = 0;
 
@@ -358,6 +358,35 @@ void drawFanPage(const String& json) {
   display.setFont(u8g2_font_5x8_tf);
   display.drawStr(82, 51, "Mem");
   display.drawStr(104, 51, fanMem.c_str());
+}
+
+void drawUpsPage(const String& json) {
+  String hostname = getHostname(json);
+  String status = valueOrDash(getValue(json, "ups_status"));
+  String charge = valueOrDash(getValue(json, "ups_charge"));
+  String runtime = valueOrDash(getValue(json, "ups_runtime"));
+  String load = valueOrDash(getValue(json, "ups_load"));
+  String input = valueOrDash(getValue(json, "ups_input"));
+
+  drawHeader(hostname, "UPS");
+
+  display.setFont(u8g2_font_6x10_tf);
+
+  display.drawStr(0, 25, "Stat");
+  display.drawStr(38, 25, status.c_str());
+
+  display.drawStr(68, 25, "In");
+  display.drawStr(92, 25, input.c_str());
+
+  display.drawStr(0, 38, "Batt");
+  display.drawStr(38, 38, charge.c_str());
+
+  display.drawStr(0, 51, "Run");
+  display.drawStr(38, 51, runtime.c_str());
+
+  display.drawStr(78, 51, "Ld");
+  display.setFont(u8g2_font_5x8_tf);
+  display.drawStr(96, 51, load.c_str());
 }
 
 void drawPoolPage(const String& json, int poolIndex) {
@@ -780,6 +809,8 @@ void drawStatusFrame() {
     drawTempPage(lastJson);
   } else if (currentPage == 3) {
     drawFanPage(lastJson);
+  } else if (currentPage == 4) {
+    drawUpsPage(lastJson);
   } else {
     int poolIndex = dynamicPageToPoolIndex(currentPage);
     drawPoolPage(lastJson, poolIndex);
@@ -919,7 +950,7 @@ void handleSerial() {
     } else {
       inputLine += c;
 
-      if (inputLine.length() > 1600) {
+      if (inputLine.length() > 2200) {
         inputLine = "";
       }
     }
@@ -1054,7 +1085,7 @@ void loop() {
 }
 
 void setup() {
-  Serial.setRxBufferSize(2048);
+  Serial.setRxBufferSize(3072);
   Serial.begin(SERIAL_BAUD);
   delay(500);
 
