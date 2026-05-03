@@ -56,6 +56,7 @@ SERIAL_PORT = os.getenv(
 INTERVAL_SECONDS = get_env_int("INTERVAL_SECONDS", 5)
 LOG_EVERY_N_PAYLOADS = get_env_int("LOG_EVERY_N_PAYLOADS", 60)
 MAX_POOLS = get_env_int("MAX_POOLS", 4)
+UPS_NAME = os.getenv("UPS_NAME", "ups@localhost").strip() or "ups@localhost"
 
 _pool_name = os.getenv("POOL_NAME", "").strip()
 POOL_NAME = _pool_name if _pool_name else None
@@ -455,6 +456,86 @@ def get_net_rates(iface: str) -> tuple[str, str]:
     return format_rate(rx_rate), format_rate(tx_rate)
 
 
+def get_ups_raw() -> dict[str, str]:
+    """Return raw key-value data from upsc for the configured UPS."""
+    output = run(["upsc", UPS_NAME], timeout=4)
+    if not output:
+        return {}
+
+    values = {}
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        values[key.strip()] = value.strip()
+
+    return values
+
+
+def format_seconds_as_minutes(value: str) -> str:
+    """Format seconds as a compact minutes or hours+minutes string."""
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return "-"
+
+    minutes = round(seconds / 60)
+
+    if minutes >= 60:
+        hours, remaining_minutes = divmod(minutes, 60)
+        return f"{hours}h {remaining_minutes}m"
+
+    return f"{minutes}m"
+
+
+def append_percent(value: str) -> str:
+    """Append percent sign to a UPS value when missing."""
+    if not value or value == "-":
+        return "-"
+
+    if value.endswith("%"):
+        return value
+
+    return f"{value}%"
+
+
+def append_volts(value: str) -> str:
+    """Normalize UPS voltage values to a compact volts string."""
+    if not value or value == "-":
+        return "-"
+
+    try:
+        volts = round(float(value))
+        return f"{volts}V"
+    except ValueError:
+        return value
+
+
+def get_ups_stats() -> dict[str, str]:
+    """Return normalized UPS stats for the payload."""
+    raw = get_ups_raw()
+
+    if not raw:
+        return {
+            "ups_status": "-",
+            "ups_charge": "-",
+            "ups_runtime": "-",
+            "ups_load": "-",
+            "ups_input": "-",
+            "ups_model": "-",
+        }
+
+    return {
+        "ups_status": raw.get("ups.status", "-"),
+        "ups_charge": append_percent(raw.get("battery.charge", "-")),
+        "ups_runtime": format_seconds_as_minutes(raw.get("battery.runtime", "-")),
+        "ups_load": append_percent(raw.get("ups.load", "-")),
+        "ups_input": append_volts(raw.get("input.voltage", "-")),
+        "ups_model": raw.get("device.model", "-"),
+    }
+
+
 def get_disk_max_temp() -> str:
     """Return the highest SMART-reported disk temperature in Celsius."""
     temps = []
@@ -554,6 +635,7 @@ def get_fan_status(fans: dict[str, str] | None = None) -> str:
 def build_payload() -> dict[str, str]:
     """Assemble the serial payload for the ESP32 display."""
     fans = get_hp_fans()
+    ups = get_ups_stats()
     pools = get_all_pool_names()
 
     primary_pool = POOL_NAME
@@ -598,6 +680,12 @@ def build_payload() -> dict[str, str]:
         "net_speed": get_link_speed(iface),
         "net_rx": net_rx,
         "net_tx": net_tx,
+        "ups_status": ups["ups_status"],
+        "ups_charge": ups["ups_charge"],
+        "ups_runtime": ups["ups_runtime"],
+        "ups_load": ups["ups_load"],
+        "ups_input": ups["ups_input"],
+        "ups_model": ups["ups_model"],
         "pool_count": str(min(len(pools), MAX_POOLS)),
     }
 
