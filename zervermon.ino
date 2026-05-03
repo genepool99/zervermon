@@ -6,6 +6,23 @@
 #define SCL_PIN 6
 #define SERIAL_BAUD 115200
 
+// To use the 2.42" SSD1309 OLED, compile with:
+// #define DISPLAY_PROFILE DISPLAY_PROFILE_LARGE_SSD1309_128X64
+// or change the default DISPLAY_PROFILE below.
+
+#define DISPLAY_PROFILE_SMALL_SH1106_128X64 1
+#define DISPLAY_PROFILE_LARGE_SSD1309_128X64 2
+
+// DISPLAY_PROFILE_SMALL_SH1106_128X64:
+//   Current 1.3" SH1106 128x64 I2C OLED.
+// DISPLAY_PROFILE_LARGE_SSD1309_128X64:
+//   2.42" SSD1309 128x64 I2C OLED.
+// Both are 128x64, so layout coordinates remain mostly shared.
+
+#ifndef DISPLAY_PROFILE
+#define DISPLAY_PROFILE DISPLAY_PROFILE_LARGE_SSD1309_128X64
+#endif
+
 #define STARTUP_ANIMATION_MS 10000UL
 #define ERROR_AFTER_MS 30000UL
 #define PAGE_INTERVAL_MS 8000UL
@@ -18,13 +35,24 @@
 #define ERROR_SWEEP_INTERVAL_MS 60000UL
 #define ERROR_SWEEP_DURATION_MS 6000UL
 #define CONNECTED_MESSAGE_MS 2500UL
+#define STARTUP_WAIT_GRACE_MS 120000UL
+#define WAITING_ANIMATION_FRAME_MS 120UL
 
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_LARGE_SSD1309_128X64
+U8G2_SSD1309_128X64_NONAME0_F_HW_I2C display(
+  U8G2_R0,
+  U8X8_PIN_NONE,
+  SCL_PIN,
+  SDA_PIN
+);
+#else
 U8G2_SH1106_128X64_NONAME_F_HW_I2C display(
   U8G2_R0,
   U8X8_PIN_NONE,
   SCL_PIN,
   SDA_PIN
 );
+#endif
 
 String inputLine = "";
 String lastJson = "";
@@ -45,10 +73,12 @@ bool errorSweepActive = false;
 bool startupComplete = false;
 bool startupSweepComplete = false;
 bool connectedMessageShown = false;
+bool waitingForInitialData = false;
 
 int currentPage = 0;
 const int BASE_PAGE_COUNT = 4;
 const int MAX_POOL_PAGES = 4;
+unsigned long waitingForInitialDataStartMs = 0;
 
 // Screensaver position
 int saverX = 0;
@@ -139,13 +169,29 @@ int dynamicPageToPoolIndex(int page) {
   return 0;
 }
 
+void setNormalContrast() {
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_LARGE_SSD1309_128X64
+  display.setContrast(220);
+#else
+  display.setContrast(180);
+#endif
+}
+
+void setDimContrast() {
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_LARGE_SSD1309_128X64
+  display.setContrast(100);
+#else
+  display.setContrast(80);
+#endif
+}
+
 void wakeDisplay() {
   if (!displayIsOn) {
     display.setPowerSave(0);
     displayIsOn = true;
   }
 
-  display.setContrast(180);
+  setNormalContrast();
 }
 
 void sleepDisplay() {
@@ -369,6 +415,50 @@ void drawTinyMascot(int x, int y, int step) {
   }
 }
 
+void drawWaitingForServerFrame() {
+  wakeDisplay();
+  setNormalContrast();
+  display.clearBuffer();
+
+  unsigned long elapsed = millis() - waitingForInitialDataStartMs;
+
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(8, 12, "waiting for");
+  display.drawStr(18, 25, "server snacks");
+
+  // Animated dotted path from left to right.
+  int pathOffset = (millis() / WAITING_ANIMATION_FRAME_MS) % 16;
+  for (int x = -pathOffset; x < 128; x += 16) {
+    display.drawPixel(x, 42);
+    display.drawPixel(x + 4, 42);
+  }
+
+  // Tiny server box on the right.
+  int serverX = 98;
+  int serverY = 32;
+  display.drawRFrame(serverX, serverY, 24, 18, 3);
+  display.drawHLine(serverX + 4, serverY + 6, 16);
+  display.drawHLine(serverX + 4, serverY + 11, 16);
+
+  // Blinking server light.
+  if ((millis() / 350) % 2 == 0) {
+    display.drawDisc(serverX + 18, serverY + 14, 1);
+  }
+
+  // Tiny mascot pacing toward the server.
+  int walkX = map((elapsed % 5000UL), 0, 5000, -12, 88);
+  int step = (millis() / 180) % 2;
+  drawTinyMascot(walkX, 48, step);
+
+  // Small progress dots along bottom so the screen is not static.
+  int dot = (millis() / 90) % 128;
+  display.drawPixel(dot, 62);
+  display.drawPixel((dot + 31) % 128, 62);
+  display.drawPixel((dot + 67) % 128, 62);
+
+  display.sendBuffer();
+}
+
 void drawBigMascot(int x, int y, int mouthOpen) {
   display.drawRFrame(x + 4, y + 4, 10, 7, 2);
   display.drawBox(x + 5, y + 5, 8, 5);
@@ -485,7 +575,7 @@ void drawWalker() {
 
 void drawStartupFrame() {
   wakeDisplay();
-  display.setContrast(180);
+  setNormalContrast();
   display.clearBuffer();
 
   unsigned long elapsed = millis() - bootStartedMs;
@@ -511,7 +601,7 @@ void drawStartupFrame() {
 
 void drawFullSweepFrame() {
   wakeDisplay();
-  display.setContrast(180);
+  setNormalContrast();
   display.clearBuffer();
 
   unsigned long elapsed = millis() - lastFullSweepStartMs;
@@ -619,7 +709,7 @@ void drawErrorSweepFrame() {
 
 void drawConnectedFrame() {
   wakeDisplay();
-  display.setContrast(180);
+  setNormalContrast();
   display.clearBuffer();
 
   String hostname = "server";
@@ -710,7 +800,7 @@ void drawStatusFrame() {
 
 void drawScreensaverFrame() {
   wakeDisplay();
-  display.setContrast(80);
+  setDimContrast();
 
   display.clearBuffer();
 
@@ -795,6 +885,14 @@ void handleSerial() {
         lastJson = inputLine;
         lastDataMs = millis();
 
+        if (waitingForInitialData) {
+          waitingForInitialData = false;
+          connectedMessageShown = false;
+          connectedMessageStartMs = millis();
+          currentPage = 0;
+          lastPageMs = millis();
+        }
+
         // Only jump back to the SYS page when data first appears
         // or when recovering from an error/no-data state.
         // Do not reset the page on every normal update.
@@ -809,6 +907,7 @@ void handleSerial() {
           startupComplete &&
           startupSweepComplete &&
           connectedMessageShown &&
+          !waitingForInitialData &&
           !fullSweepActive &&
           !errorSweepActive
         ) {
@@ -859,9 +958,33 @@ void loop() {
     }
 
     startupSweepComplete = true;
-    connectedMessageStartMs = now;
     lastFullSweepStartMs = now;
+
+    if (lastJson.length() > 0) {
+      connectedMessageStartMs = now;
+      connectedMessageShown = false;
+    } else {
+      waitingForInitialData = true;
+      waitingForInitialDataStartMs = now;
+    }
     return;
+  }
+
+  if (waitingForInitialData) {
+    if (lastJson.length() > 0) {
+      waitingForInitialData = false;
+      connectedMessageShown = false;
+      connectedMessageStartMs = now;
+      currentPage = 0;
+      lastPageMs = now;
+    } else if (now - waitingForInitialDataStartMs < STARTUP_WAIT_GRACE_MS) {
+      drawWaitingForServerFrame();
+      return;
+    } else {
+      waitingForInitialData = false;
+      connectedMessageShown = true; // skip connected message
+      // fall through to normal no-data ERROR behavior
+    }
   }
 
   if (!connectedMessageShown) {
@@ -907,7 +1030,7 @@ void loop() {
 
   bool hasRecentData = lastDataMs > 0 && now - lastDataMs < SCREENSAVER_AFTER_MS;
 
-  display.setContrast(180);
+  setNormalContrast();
 
   maybeUpdateFullSweep(hasRecentData);
   if (fullSweepActive) {
@@ -938,7 +1061,11 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
 
   display.begin();
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_LARGE_SSD1309_128X64
+  display.setContrast(220);
+#else
   display.setContrast(180);
+#endif
 
   bootStartedMs = millis();
   startupComplete = false;
